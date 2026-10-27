@@ -15,7 +15,6 @@ output/
 evidencias/
 *.tar
 k8s/vm/03-secrets.yaml
-k8s/aws/03-secrets.yaml
 
 **/resultados/
 *.pem
