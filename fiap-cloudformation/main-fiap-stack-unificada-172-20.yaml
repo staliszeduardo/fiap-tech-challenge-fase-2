@@ -1,0 +1,339 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'FIAP - RDS, Redis, DynamoDB, SQS e EKS nas mesmas duas subnets privadas /24 existentes da VPC.'
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: 'VPC existente do Tech Challenge.'
+  PrivateSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: 'Selecione somente as subnets PRIVADAS /24: 172.20.1.0/24 (A-2) e 172.20.3.0/24 (B-2), em AZs distintas.'
+  AdminCloudShellSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: 'SG exclusivo do CloudShell VPC que acessara RDS/Redis.'
+  DbMasterPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 8
+    MaxLength: 128
+    Description: 'Senha FORTE do administrador PostgreSQL, informada no console na criacao.'
+  DbInstanceClass:
+    Type: String
+    Default: db.t4g.micro
+    AllowedValues: [db.t4g.micro, db.t3.micro, db.t4g.small]
+  RedisNodeType:
+    Type: String
+    Default: cache.t4g.micro
+    AllowedValues: [cache.t4g.micro, cache.t3.micro, cache.t4g.small]
+  AnalyticsTableName:
+    Type: String
+    Default: ToggleMasterAnalytics
+    MinLength: 3
+    MaxLength: 255
+    AllowedPattern: '[a-zA-Z0-9_.-]+'
+    Description: 'Nome EXATO da tabela esperado pelo codigo analytics-service.'
+  AnalyticsPartitionKeyName:
+    Type: String
+    Default: event_id
+    MinLength: 1
+    Description: 'Nome EXATO da chave de particao esperado pelo analytics-service (ex: id).'
+  AnalyticsPartitionKeyType:
+    Type: String
+    Default: S
+    AllowedValues: [S, N, B]
+    Description: 'Tipo da chave: S=String, N=Number ou B=Binary. Conferir no codigo.'
+  EvaluationAnalyticsQueueName:
+    Type: String
+    Default: fiap-evaluation-analytics-queue
+    AllowedPattern: '[a-zA-Z0-9_-]+'
+    MinLength: 1
+    MaxLength: 80
+    Description: 'Nome da fila Standard compartilhada por evaluation-service e analytics-service.'
+  ClusterName:
+    Type: String
+    Default: fiap-techchallenge
+  EksAdminPrincipalArn:
+    Type: String
+    Default: arn:aws:iam::608541039538:user/lita
+    AllowedPattern: '^arn:(aws|aws-us-gov|aws-cn):iam::[0-9]{12}:(user|role)/[A-Za-z0-9+=,.@_/-]+$'
+    Description: 'ARN IAM do usuario ou role que administrara o Kubernetes. Nao usar ARN de sessao STS.'
+  NodeGroupName:
+    Type: String
+    Default: workers-fiap
+  NodeInstanceType:
+    Type: String
+    Default: t3.small
+  NodeDesiredSize:
+    Type: Number
+    Default: 2
+    MinValue: 1
+  NodeMinSize:
+    Type: Number
+    Default: 1
+    MinValue: 0
+  NodeMaxSize:
+    Type: Number
+    Default: 4
+    MinValue: 1
+  ClusterPublicAccessCidr:
+    Type: String
+    Description: 'Seu IP publico /32 para usar kubectl de casa, exemplo 203.0.113.10/32. Nunca 0.0.0.0/0 para uso permanente.'
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/(\d|[12]\d|3[0-2])$'
+Resources:
+  RdsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'FIAP PostgreSQL - entrada apenas clientes autorizados'
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref AdminCloudShellSecurityGroupId
+          Description: 'CloudShell VPC administrativo'
+      Tags:
+        - Key: Name
+          Value: fiap-rds-sg
+  EksRdsIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref RdsSecurityGroup
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !GetAtt EksCluster.ClusterSecurityGroupId
+      Description: 'Clientes EKS'
+  RedisSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'FIAP Redis - entrada apenas clientes autorizados'
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 6379
+          ToPort: 6379
+          SourceSecurityGroupId: !Ref AdminCloudShellSecurityGroupId
+          Description: 'CloudShell VPC administrativo'
+      Tags:
+        - Key: Name
+          Value: fiap-redis-sg
+  EksRedisIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref RedisSecurityGroup
+      IpProtocol: tcp
+      FromPort: 6379
+      ToPort: 6379
+      SourceSecurityGroupId: !GetAtt EksCluster.ClusterSecurityGroupId
+      Description: 'Clientes EKS'
+  DbSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: 'FIAP - subnets privadas existentes'
+      SubnetIds: !Ref PrivateSubnetIds
+      Tags:
+        - Key: Name
+          Value: fiap-rds-private-subnets-iac
+  CacheSubnetGroup:
+    Type: AWS::ElastiCache::SubnetGroup
+    Properties:
+      Description: 'FIAP - subnets privadas existentes'
+      SubnetIds: !Ref PrivateSubnetIds
+  Postgres:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      DBInstanceIdentifier: rds-fiap
+      Engine: postgres
+      EngineVersion: '18.3'
+      DBInstanceClass: !Ref DbInstanceClass
+      AllocatedStorage: '20'
+      StorageType: gp3
+      DBName: authdb
+      MasterUsername: postgres
+      MasterUserPassword: !Ref DbMasterPassword
+      DBSubnetGroupName: !Ref DbSubnetGroup
+      VPCSecurityGroups:
+        - !Ref RdsSecurityGroup
+      PubliclyAccessible: false
+      MultiAZ: false
+      StorageEncrypted: true
+      BackupRetentionPeriod: 0
+      DeletionProtection: false
+      Port: '5432'
+      AutoMinorVersionUpgrade: true
+      Tags:
+        - Key: Name
+          Value: rds-fiap
+  Redis:
+    Type: AWS::ElastiCache::ReplicationGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      ReplicationGroupId: redis-fiap
+      ReplicationGroupDescription: 'FIAP - cache do evaluation-service'
+      Engine: redis
+      EngineVersion: '7.1'
+      CacheNodeType: !Ref RedisNodeType
+      NumCacheClusters: 1
+      CacheSubnetGroupName: !Ref CacheSubnetGroup
+      SecurityGroupIds:
+        - !Ref RedisSecurityGroup
+      Port: 6379
+      AutomaticFailoverEnabled: false
+      MultiAZEnabled: false
+      AtRestEncryptionEnabled: true
+      TransitEncryptionEnabled: true
+      SnapshotRetentionLimit: 0
+      Tags:
+        - Key: Name
+          Value: redis-fiap
+  AnalyticsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      TableName: !Ref AnalyticsTableName
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: !Ref AnalyticsPartitionKeyName
+          AttributeType: !Ref AnalyticsPartitionKeyType
+      KeySchema:
+        - AttributeName: !Ref AnalyticsPartitionKeyName
+          KeyType: HASH
+      Tags:
+        - Key: Name
+          Value: !Ref AnalyticsTableName
+        - Key: Project
+          Value: FIAP-TechChallenge
+  EvaluationAnalyticsQueue:
+    Type: AWS::SQS::Queue
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      QueueName: !Ref EvaluationAnalyticsQueueName
+      VisibilityTimeout: 60
+      MessageRetentionPeriod: 345600
+      SqsManagedSseEnabled: true
+      Tags:
+        - Key: Name
+          Value: !Ref EvaluationAnalyticsQueueName
+        - Key: Project
+          Value: FIAP-TechChallenge
+  EksClusterRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-cluster-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: eks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+  EksNodeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-node-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryPullOnly
+        - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+  EksCluster:
+    Type: AWS::EKS::Cluster
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: 'Administracao declarada pela AccessEntry, evitando entrada automatica duplicada para o criador.'
+        must:
+          - 'Manter autenticacao por API para suportar AccessEntry.'
+          - 'BootstrapClusterCreatorAdminPermissions e definido na criacao; altera-lo substitui o cluster.'
+    Properties:
+      Name: !Ref ClusterName
+      RoleArn: !GetAtt EksClusterRole.Arn
+      AccessConfig:
+        AuthenticationMode: API_AND_CONFIG_MAP
+        BootstrapClusterCreatorAdminPermissions: false
+      ResourcesVpcConfig:
+        SubnetIds: !Ref PrivateSubnetIds
+        EndpointPrivateAccess: true
+        EndpointPublicAccess: true
+        PublicAccessCidrs:
+          - !Ref ClusterPublicAccessCidr
+      Tags:
+        - Key: Project
+          Value: FIAP-TechChallenge
+  EksNodeGroup:
+    Type: AWS::EKS::Nodegroup
+    Properties:
+      ClusterName: !Ref EksCluster
+      NodegroupName: !Ref NodeGroupName
+      NodeRole: !GetAtt EksNodeRole.Arn
+      Subnets: !Ref PrivateSubnetIds
+      InstanceTypes:
+        - !Ref NodeInstanceType
+      AmiType: AL2023_x86_64_STANDARD
+      CapacityType: ON_DEMAND
+      DiskSize: 20
+      ScalingConfig:
+        MinSize: !Ref NodeMinSize
+        DesiredSize: !Ref NodeDesiredSize
+        MaxSize: !Ref NodeMaxSize
+  EksAdminAccessEntry:
+    Type: AWS::EKS::AccessEntry
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: 'Acesso administrativo Kubernetes explicito e gerenciado pela stack, separado das roles de infraestrutura.'
+        must:
+          - 'PrincipalArn deve identificar usuario ou role IAM existente, sem outra AccessEntry para o mesmo principal no cluster.'
+    Properties:
+      ClusterName: !Ref EksCluster
+      PrincipalArn: !Ref EksAdminPrincipalArn
+      Type: STANDARD
+      AccessPolicies:
+        - PolicyArn: !Sub 'arn:${AWS::Partition}:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy'
+          AccessScope:
+            Type: cluster
+Outputs:
+  RdsEndpoint:
+    Value: !GetAtt Postgres.Endpoint.Address
+  RdsPort:
+    Value: !GetAtt Postgres.Endpoint.Port
+  RdsSecurityGroupId:
+    Value: !Ref RdsSecurityGroup
+  RedisPrimaryEndpoint:
+    Value: !GetAtt Redis.PrimaryEndPoint.Address
+  RedisPort:
+    Value: !GetAtt Redis.PrimaryEndPoint.Port
+  RedisSecurityGroupId:
+    Value: !Ref RedisSecurityGroup
+  AnalyticsTableNameOutput:
+    Description: 'Nome da tabela do analytics-service'
+    Value: !Ref AnalyticsTable
+  AnalyticsTableArn:
+    Value: !GetAtt AnalyticsTable.Arn
+  EvaluationAnalyticsQueueUrl:
+    Value: !Ref EvaluationAnalyticsQueue
+  EvaluationAnalyticsQueueArn:
+    Value: !GetAtt EvaluationAnalyticsQueue.Arn
+  ClusterName:
+    Value: !Ref EksCluster
+  ClusterEndpoint:
+    Value: !GetAtt EksCluster.Endpoint
+  NodeGroupName:
+    Value: !Ref EksNodeGroup
+  ClusterSecurityGroupId:
+    Value: !GetAtt EksCluster.ClusterSecurityGroupId
+  KubernetesCommand:
+    Value: !Sub 'aws eks update-kubeconfig --region ${AWS::Region} --name ${EksCluster}'

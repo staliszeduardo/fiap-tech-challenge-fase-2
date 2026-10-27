@@ -1,0 +1,153 @@
+name: togglemaster-local
+
+services:
+  postgres-auth-flags:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: tc
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Execute .\\setup-local.ps1 primeiro}
+      SERVICE_API_KEY_SHA256: ${SERVICE_API_KEY_SHA256:?Execute .\\setup-local.ps1 primeiro}
+    volumes:
+      - pg_auth_flags:/var/lib/postgresql/data
+      - ./local/init-auth-flags.sh:/docker-entrypoint-initdb.d/01-init.sh:ro
+      - ./Microserviços/auth-service/db/init.sql:/seed/auth.sql:ro
+      - ./Microserviços/flag-service/db/init.sql:/seed/flags.sql:ro
+      - ./local/service-key.sql:/seed/service-key.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tc -d auth_db && pg_isready -U tc -d flags_db"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  postgres-targeting:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: tc
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Execute .\\setup-local.ps1 primeiro}
+      POSTGRES_DB: targeting_db
+    volumes:
+      - pg_targeting:/var/lib/postgresql/data
+      - ./Microserviços/targeting-service/db/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tc -d targeting_db"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  dynamodb-local:
+    image: amazon/dynamodb-local:latest
+    user: root
+    command: ["-jar", "DynamoDBLocal.jar", "-sharedDb", "-dbPath", "/home/dynamodblocal/data"]
+    working_dir: /home/dynamodblocal
+    volumes:
+      - dynamodb_data:/home/dynamodblocal/data
+    ports:
+      - "127.0.0.1:8000:8000"
+
+  sqs:
+    image: softwaremill/elasticmq-native:latest
+    volumes:
+      - ./local/elasticmq.conf:/opt/elasticmq.conf:ro
+    ports:
+      - "127.0.0.1:9324:9324"
+
+  auth-service:
+    build: ./Microserviços/auth-service
+    environment:
+      PORT: 8001
+      DATABASE_URL: postgres://tc:${POSTGRES_PASSWORD}@postgres-auth-flags:5432/auth_db?sslmode=disable
+      MASTER_KEY: ${MASTER_KEY:?Execute .\\setup-local.ps1 primeiro}
+    depends_on:
+      postgres-auth-flags:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8001:8001"
+
+  flag-service:
+    build: ./Microserviços/flag-service
+    environment:
+      PORT: 8002
+      DATABASE_URL: postgres://tc:${POSTGRES_PASSWORD}@postgres-auth-flags:5432/flags_db
+      AUTH_SERVICE_URL: http://auth-service:8001
+    depends_on:
+      postgres-auth-flags:
+        condition: service_healthy
+      auth-service:
+        condition: service_started
+    ports:
+      - "127.0.0.1:8002:8002"
+
+  targeting-service:
+    build: ./Microserviços/targeting-service
+    environment:
+      PORT: 8003
+      DATABASE_URL: postgres://tc:${POSTGRES_PASSWORD}@postgres-targeting:5432/targeting_db
+      AUTH_SERVICE_URL: http://auth-service:8001
+    depends_on:
+      postgres-targeting:
+        condition: service_healthy
+      auth-service:
+        condition: service_started
+    ports:
+      - "127.0.0.1:8003:8003"
+
+  evaluation-service:
+    build: ./Microserviços/evaluation-service
+    environment:
+      PORT: 8004
+      REDIS_URL: redis://redis:6379
+      FLAG_SERVICE_URL: http://flag-service:8002
+      TARGETING_SERVICE_URL: http://targeting-service:8003
+      SERVICE_API_KEY: ${SERVICE_API_KEY:?Execute .\\setup-local.ps1 primeiro}
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: local
+      AWS_SECRET_ACCESS_KEY: local
+      AWS_SQS_ENDPOINT_URL: http://sqs:9324
+      AWS_SQS_URL: http://sqs:9324/queue/ToggleMasterEvents
+    depends_on:
+      redis:
+        condition: service_healthy
+      flag-service:
+        condition: service_started
+      targeting-service:
+        condition: service_started
+      sqs:
+        condition: service_started
+    ports:
+      - "127.0.0.1:8004:8004"
+
+  analytics-service:
+    build: ./Microserviços/analytics-service
+    environment:
+      PORT: 8005
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: local
+      AWS_SECRET_ACCESS_KEY: local
+      AWS_SQS_ENDPOINT_URL: http://sqs:9324
+      AWS_SQS_URL: http://sqs:9324/queue/ToggleMasterEvents
+      DYNAMODB_ENDPOINT_URL: http://dynamodb-local:8000
+      AWS_DYNAMODB_TABLE: ToggleMasterAnalytics
+    depends_on:
+      dynamodb-local:
+        condition: service_started
+      sqs:
+        condition: service_started
+    ports:
+      - "127.0.0.1:8005:8005"
+
+volumes:
+  pg_auth_flags:
+  pg_targeting:
+  redis_data:
+  dynamodb_data:

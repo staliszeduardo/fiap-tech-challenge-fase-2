@@ -1,0 +1,37 @@
+﻿apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: keda-sqs-auth
+  namespace: togglemaster
+spec:
+  podIdentity:
+    provider: aws
+    identityOwner: keda
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: analytics-sqs
+  namespace: togglemaster
+spec:
+  scaleTargetRef:
+    name: analytics-service
+  pollingInterval: 5
+  cooldownPeriod: 60
+  minReplicaCount: 1
+  maxReplicaCount: 3
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 30
+  triggers:
+    - type: aws-sqs-queue
+      metadata:
+        queueURL: https://sqs.us-east-1.amazonaws.com/608541039538/fiap-evaluation-analytics-queue
+        awsRegion: us-east-1
+        queueLength: "10"
+        activationQueueLength: "0"
+        scaleOnInFlight: "true"
+      authenticationRef:
+        name: keda-sqs-auth

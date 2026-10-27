@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: togglemaster-config
+  namespace: togglemaster
+data:
+  AUTH_SERVICE_URL: http://auth-service:8001
+  FLAG_SERVICE_URL: http://flag-service:8002
+  TARGETING_SERVICE_URL: http://targeting-service:8003
+  REDIS_URL: rediss://master.redis-fiap.y4wj4j.use1.cache.amazonaws.com:6379
+  AWS_REGION: us-east-1
+  AWS_SQS_URL: https://sqs.us-east-1.amazonaws.com/608541039538/fiap-evaluation-analytics-queue
+  AWS_DYNAMODB_TABLE: ToggleMasterAnalytics

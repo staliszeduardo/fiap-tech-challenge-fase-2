@@ -1,0 +1,31 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Federated": "arn:aws:iam::608541039538:oidc-provider/oidc.eks.us-east-1.amazonaws.com/id/81CB7F1C9AE0690E3DD77119F8848450"
+      },
+      "Action": "sts:AssumeRoleWithWebIdentity",
+      "Condition": {
+        "StringEquals": {
+          "oidc.eks.us-east-1.amazonaws.com/id/81CB7F1C9AE0690E3DD77119F8848450:aud": "sts.amazonaws.com",
+          "oidc.eks.us-east-1.amazonaws.com/id/81CB7F1C9AE0690E3DD77119F8848450:sub": "system:serviceaccount:kube-system:aws-load-balancer-controller"
+        }
+      }
+    },
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Federated": "arn:aws:iam::608541039538:oidc-provider/oidc.eks.us-east-1.amazonaws.com/id/28947E8E524D2CFF2D814AA05DB1DF39"
+      },
+      "Action": "sts:AssumeRoleWithWebIdentity",
+      "Condition": {
+        "StringEquals": {
+          "oidc.eks.us-east-1.amazonaws.com/id/28947E8E524D2CFF2D814AA05DB1DF39:aud": "sts.amazonaws.com",
+          "oidc.eks.us-east-1.amazonaws.com/id/28947E8E524D2CFF2D814AA05DB1DF39:sub": "system:serviceaccount:kube-system:aws-load-balancer-controller"
+        }
+      }
+    }
+  ]
+}

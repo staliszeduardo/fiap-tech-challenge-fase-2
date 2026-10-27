@@ -1,0 +1,69 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: togglemaster-rds-init
+  namespace: togglemaster
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 300
+  template:
+    metadata:
+      labels:
+        app: togglemaster-rds-init
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      containers:
+      - name: init
+        image: postgres:16-alpine
+        imagePullPolicy: IfNotPresent
+        command:
+        - sh
+        - -ec
+        - |
+          psql -v ON_ERROR_STOP=1 -d postgres -f /sql/00-create-databases.sql
+          psql -v ON_ERROR_STOP=1 -d authdb -f /sql/auth.sql
+          psql -v ON_ERROR_STOP=1 -d flagdb -f /sql/flag.sql
+          psql -v ON_ERROR_STOP=1 -d targetingdb -f /sql/targeting.sql
+          psql -v ON_ERROR_STOP=1 -v service_key_hash="$SERVICE_API_KEY_SHA256" -d authdb -f /sql/service-key.sql
+          echo "RDS inicializado: authdb, flagdb e targetingdb; chave interna cadastrada."
+        env:
+        - name: PGHOST
+          valueFrom:
+            secretKeyRef:
+              name: togglemaster-secrets
+              key: RDS_HOST
+        - name: PGUSER
+          valueFrom:
+            secretKeyRef:
+              name: togglemaster-secrets
+              key: RDS_USER
+        - name: PGPASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: togglemaster-secrets
+              key: POSTGRES_PASSWORD
+        - name: SERVICE_API_KEY_SHA256
+          valueFrom:
+            secretKeyRef:
+              name: togglemaster-secrets
+              key: SERVICE_API_KEY_SHA256
+        - name: PGSSLMODE
+          value: require
+        - name: PGCONNECT_TIMEOUT
+          value: '10'
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 250m
+            memory: 128Mi
+        volumeMounts:
+        - name: sql
+          mountPath: /sql
+          readOnly: true
+      volumes:
+      - name: sql
+        configMap:
+          name: togglemaster-db-init
