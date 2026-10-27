@@ -1,0 +1,230 @@
+aws sts get-caller-identity
+aws eks get-token --region us-east-1 --cluster-name fiap-techchallenge
+
+Amazon Elastic Kubernetes Service > Clusters > Access 
+Lita
+Standard
+AmazonEKSClusterAdminPolicy
+
+aws eks update-kubeconfig --region us-east-1 --name fiap-techchallenge
+kubectl get nodes -o wide
+kubectl get pods -A
+aws sts get-caller-identity
+
+#Instalar o Metrics Server
+kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+kubectl rollout status deployment/metrics-server -n kube-system --timeout=180s
+kubectl get pods -n kube-system -l k8s-app=metrics-server
+kubectl top nodes
+
+#F5 NGINX Ingress Controller
+helm upgrade --install nginx-ingress oci://ghcr.io/nginx/charts/nginx-ingress --version 2.8.0 --namespace nginx-ingress --create-namespace --set controller.service.type=ClusterIP --wait --timeout 5m
+kubectl get pods -n nginx-ingress
+kubectl get svc -n nginx-ingress
+kubectl get ingressclass
+
+#### TESTE SEM LOAD BALANCER
+kubectl port-forward -n nginx-ingress service/nginx-ingress-controller 8080:80
+
+ABRIR OUTRO TERMINAL E RODAR curl.exe -i http://localhost:8080
+
+# Configurar OIDC para o EKS
+eksctl utils associate-iam-oidc-provider --cluster fiap-techchallenge --region us-east-1 --approve
+
+
+# Criar a política IAM do AWS Load Balancer Controller
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/v2.14.1/docs/install/iam_policy.json" -OutFile "iam_policy.json"
+aws iam create-policy --policy-name AWSLoadBalancerControllerIAMPolicy --policy-document file://iam_policy.json
+
+# Criar a ServiceAccount com IRSA
+kubectl create serviceaccount aws-load-balancer-controller -n kube-system
+kubectl annotate serviceaccount aws-load-balancer-controller -n kube-system eks.amazonaws.com/role-arn=arn:aws:iam::608541039538:role/AmazonEKSLoadBalancerControllerRole --overwrite
+
+VALIDAÇÃO
+kubectl get serviceaccount aws-load-balancer-controller -n kube-system -o yaml
+
+# AWS Load Balancer Controller
+helm repo add eks https://aws.github.io/eks-charts
+
+helm repo update eks
+
+helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller --namespace kube-system --version 1.14.0 --set clusterName=fiap-techchallenge --set region=us-east-1 --set vpcId=vpc-0ac7c8c3b75afda4 --set serviceAccount.create=false --set serviceAccount.name=aws-load-balancer-controller --wait --timeout 5m
+
+kubectl get deployment aws-load-balancer-controller -n kube-system
+
+kubectl get serviceaccount aws-load-balancer-controller -n kube-system -o yaml
+
+#Configurar as subnets públicas para o NLB
+
+SBTN-NVGA-PUB-A-2	subnet-0b2b08708e45aa6f5
+SBTN-NVGA-PUB-B-2	subnet-08a559cf5924fbd26
+
+aws ec2 create-tags --region us-east-1 --resources subnet-0b2b08708e45aa6f5 subnet-08a559cf5924fbd26 --tags Key=kubernetes.io/role/elb,Value=1
+
+eksctl utils associate-iam-oidc-provider --cluster fiap-techchallenge --region us-east-1 --approve
+
+aws iam update-assume-role-policy --role-name AmazonEKSLoadBalancerControllerRole --policy-document file://load-balancer-role-trust-policy.json
+
+kubectl rollout restart deployment/aws-load-balancer-controller -n kube-system
+
+kubectl rollout status deployment/aws-load-balancer-controller -n kube-system --timeout=120s
+
+# CRIAR NLB para o NGINX
+
+CRIAR ARQUIVO nginx-nlb-values.yaml
+
+helm upgrade nginx-ingress oci://ghcr.io/nginx/charts/nginx-ingress --version 2.8.0 --namespace nginx-ingress -f .\nginx-nlb-values.yaml --wait --timeout 5m
+
+helm upgrade aws-load-balancer-controller eks/aws-load-balancer-controller --namespace kube-system --reuse-values --version 1.14.0 --set vpcId=vpc-0ac7c8bc3b75afda4 --wait --timeout 5m
+
+kubectl get svc nginx-ingress-controller -n nginx-ingress -w
+
+VALIDAR
+kubectl get svc -n nginx-ingress
+
+
+
+##### SUBIR O AMBIENTE AWS
+cd D:\MEGA\4.Documentos Faculdade\POS Graduacao Fiap\Fase 2\Tech Challenge\k8s\aws
+
+kubectl apply -f 01-namespace.yaml
+kubectl apply -f 02-configmaps.yaml
+
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File gerar-secrets.ps1
+
+kubectl apply -f 03-secrets.yaml
+
+#IRSA
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File configurar-irsa.ps1
+
+kubectl apply -f 04-serviceaccounts.yaml
+
+kubectl get serviceaccount evaluation-service analytics-service -n togglemaster -o yaml
+
+# Inicializa DB e tabelas RDS
+
+kubectl apply -f 05-rds-init-configmap.yaml
+kubectl apply -f 05-rds-init-job.yaml
+
+kubectl wait --for=condition=complete job/togglemaster-rds-init -n togglemaster --timeout=300s
+
+kubectl logs job/togglemaster-rds-init -n togglemaster
+
+
+## Subir os 5 serviços
+
+kubectl apply -f 06-microsservicos.yaml
+
+kubectl rollout status deployment/auth-service -n togglemaster --timeout=300s
+kubectl rollout status deployment/flag-service -n togglemaster --timeout=300s
+kubectl rollout status deployment/targeting-service -n togglemaster --timeout=300s
+kubectl rollout status deployment/evaluation-service -n togglemaster --timeout=300s
+kubectl rollout status deployment/analytics-service -n togglemaster --timeout=300s
+
+kubectl get pods,deployments,services -n togglemaster
+
+####### IMPORTANTE #####
+## Ingress NLB
+
+kubectl apply -f 07-ingress.yaml
+
+kubectl get ingress -n togglemaster
+kubectl describe ingress togglemaster -n togglemaster
+
+$lb = kubectl get service nginx-ingress-controller -n nginx-ingress -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
+
+curl.exe -i -H 'Host: togglemaster.local' "http://$lb/evaluate?user_id=teste-aws&flag_name=flag-inexistente"
+
+### PROCESSAMENTO DE EVENTOS
+
+kubectl logs deployment/evaluation-service -n togglemaster --tail=50
+kubectl logs deployment/analytics-service -n togglemaster --tail=50
+
+aws dynamodb scan --table-name ToggleMasterAnalytics --region us-east-1 --limit 5
+
+
+### KEDA
+## CRIAR POLITICA
+$policy = @'
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": "sqs:GetQueueAttributes",
+      "Resource": "arn:aws:sqs:us-east-1:608541039538:fiap-evaluation-analytics-queue"
+    }
+  ]
+}
+'@
+
+$policyPath = Join-Path (Get-Location) 'keda-sqs-policy.json'
+
+[IO.File]::WriteAllText(
+    $policyPath,
+    $policy,
+    [Text.UTF8Encoding]::new($false)
+)
+
+$policyArn = aws iam list-policies `
+    --scope Local `
+    --query "Policies[?PolicyName=='ToggleMasterKedaSqsReadPolicy'].Arn | [0]" `
+    --output text
+
+if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($policyArn) -or $policyArn -eq 'None') {
+    throw 'Não foi possível localizar a política existente.'
+}
+
+Write-Host "Política encontrada: $policyArn"
+
+kubectl create namespace keda --dry-run=client -o yaml | kubectl apply -f -
+
+eksctl create iamserviceaccount `
+    --cluster fiap-techchallenge `
+    --region us-east-1 `
+    --namespace keda `
+    --name keda-operator `
+    --role-name ToggleMasterKedaRole `
+    --attach-policy-arn $policyArn `
+    --override-existing-serviceaccounts `
+    --approve
+
+kubectl annotate serviceaccount keda-operator `
+    -n keda `
+    eks.amazonaws.com/sts-regional-endpoints=true `
+    --overwrite
+	
+## INSTALAR KEDA
+helm repo add kedacore https://kedacore.github.io/charts
+helm repo update kedacore
+
+helm upgrade --install keda kedacore/keda `
+    --version 2.21.0 `
+    --namespace keda `
+    --set serviceAccount.operator.create=false `
+    --set serviceAccount.operator.name=keda-operator `
+    --wait `
+    --timeout 10m
+
+kubectl get pods -n keda
+
+### Crie o ScaledObject para a SQS.
+kubectl apply -f 09-keda-analytics.yaml
+
+kubectl wait --for=condition=Ready scaledobject/analytics-sqs -n togglemaster --timeout=180s
+
+kubectl get scaledobject,hpa -n togglemaster
+
+
+### TESTE acumulando mensagens com o consumidor pausado.
+
+kubectl annotate scaledobject analytics-sqs `
+    -n togglemaster `
+    autoscaling.keda.sh/paused-replicas-
+
+kubectl get scaledobject,hpa -n togglemaster
+
+aws sqs get-queue-attributes `
+    --region us-east-1 `
+    --queue-url $queueUrl `
+    --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible
